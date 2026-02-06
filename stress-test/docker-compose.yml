@@ -1,0 +1,20 @@
+services:
+  k6-stress:
+    image: grafana/k6:latest
+    volumes:
+      - ./scripts:/scripts
+    environment:
+      - BASE_URL=${BASE_URL:-http://host.docker.internal:9999}
+    command: run /scripts/stress-test.js
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  k6-validation:
+    image: grafana/k6:latest
+    volumes:
+      - ./scripts:/scripts
+    environment:
+      - BASE_URL=${BASE_URL:-http://host.docker.internal:9999}
+    command: run /scripts/validation.js
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
