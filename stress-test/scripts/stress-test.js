@@ -73,8 +73,8 @@ export const options = {
     idempotency_retries: {
       executor: "constant-vus",
       vus: 10,
-      duration: "50s",
-      startTime: "20s",
+      duration: "55s",
+      startTime: "15s",
       gracefulStop: "5s",
       exec: "idempotencyRetry",
       tags: { phase: "idempotency" },
