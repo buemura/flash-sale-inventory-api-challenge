@@ -54,7 +54,8 @@ POST /orders
 
 ```json
 {
-  "order_id": "gen-uuid-here",
+  "id": "uuid-here",
+  "idempotency_key": "550e8400-e29b-41d4-a716-446655440000",
   "product_id": 1,
   "customer_id": "customer_42",
   "quantity": 2,
@@ -75,26 +76,14 @@ POST /orders
 POST /orders/{order_id}/cancel
 ```
 
-**Request Body:**
-
-```json
-{
-  "product_id": 1
-}
-```
-
-**Validation rules:**
-
-| Field        | Rule                                               |
-| ------------ | -------------------------------------------------- |
-| `product_id` | Required. Integer. Must match the order's product. |
+**Request Body:** None required.
 
 **Responses:**
 
 | Status | Condition                                                              |
 | ------ | ---------------------------------------------------------------------- |
 | `200`  | Order cancelled. Stock restored.                                       |
-| `404`  | Product or order not found.                                            |
+| `404`  | Order not found.                                                       |
 | `409`  | Order already cancelled (cancel is idempotent-safe, but return `409`). |
 
 **Success response body (200):**
@@ -131,12 +120,11 @@ GET /products/{product_id}
   "id": 1,
   "name": "Mechanical Keyboard Ultra",
   "price": 4999,
-  "initial_stock": 100,
-  "current_stock": 73
+  "stock": 100
 }
 ```
 
-> `current_stock` must reflect the **real-time** accurate count considering all confirmed orders and cancellations.
+> `stock` must reflect the **real-time** accurate count considering all confirmed orders and cancellations.
 
 ---
 
@@ -150,10 +138,11 @@ Returns the last 50 orders for the product, sorted by most recent first.
 
 **Responses:**
 
-| Status | Condition          |
-| ------ | ------------------ |
-| `200`  | Product found.     |
-| `404`  | Product not found. |
+| Status | Condition                           |
+| ------ | ----------------------------------- |
+| `200`  | Product found.                      |
+| `404`  | Product not found.                  |
+| `422`  | Missing product_id query parameter. |
 
 **Success response body:**
 
@@ -170,6 +159,38 @@ Returns the last 50 orders for the product, sorted by most recent first.
       "created_at": "2025-01-15T10:30:00Z"
     }
   ]
+}
+```
+
+### 5. Get Order
+
+```
+GET /orders/{order_id}
+```
+
+Returns the order detail.
+
+**Responses:**
+
+| Status | Condition                        |
+| ------ | -------------------------------- |
+| `200`  | Order found.                     |
+| `404`  | Order not found.                 |
+| `422`  | Invalid order_id path parameter. |
+
+**Success response body:**
+
+```json
+{
+  "id": "uuid-here",
+  "idempotency_key": "550e8400-e29b-41d4-a716-446655440000",
+  "product_id": 1,
+  "customer_id": "customer_42",
+  "quantity": 2,
+  "unit_price": 4999,
+  "total_price": 9998,
+  "status": "CONFIRMED",
+  "created_at": "2025-01-15T10:30:00Z"
 }
 ```
 

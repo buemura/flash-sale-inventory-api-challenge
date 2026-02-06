@@ -35,15 +35,13 @@ const stockExhausted = new Counter("stock_exhausted");
 const ordersCancelled = new Counter("orders_cancelled");
 const cancelAlreadyCancelled = new Counter("cancel_already_cancelled");
 const idempotentReplaysCorrect = new Counter("idempotent_replays_correct");
+const getOrderSuccess = new Counter("get_order_success");
 
 // ---------------------------------------------------------------------------
 // k6 options
 // ---------------------------------------------------------------------------
 
 export const options = {
-  // Only count 5xx as HTTP failures (4xx are valid business responses)
-  httpErrors: "follow_redirects",
-
   scenarios: {
     // Phase 1 — Warm-up: confirm all products are reachable
     warmup: {
@@ -107,6 +105,17 @@ export const options = {
       exec: "flashSale",
       tags: { phase: "post_cancel_orders" },
     },
+
+    // Phase 3c — Get Order by ID (validate individual order retrieval)
+    get_order: {
+      executor: "constant-vus",
+      vus: 5,
+      duration: "25s",
+      startTime: "88s",
+      gracefulStop: "5s",
+      exec: "getOrder",
+      tags: { phase: "get_order" },
+    },
   },
 
   thresholds: {
@@ -114,9 +123,12 @@ export const options = {
     "http_req_failed{phase:cancel_wave}": ["rate<0.01"],
     "http_req_duration{phase:flash_sale}": ["p(99)<500"],
     "http_req_duration{phase:cancel_wave}": ["p(99)<500"],
+    "http_req_failed{phase:get_order}": ["rate<0.01"],
+    "http_req_duration{phase:get_order}": ["p(99)<500"],
     checks: ["rate>0.95"],
     orders_created: ["count>0"],
     idempotent_replays_correct: ["count>0"],
+    get_order_success: ["count>0"],
   },
 };
 
@@ -143,6 +155,9 @@ function pickWeightedProduct() {
 
 const JSON_HEADERS = { headers: { "Content-Type": "application/json" } };
 
+// Only treat 5xx as HTTP failures — 4xx are valid business responses (409, 422, etc.)
+http.setResponseCallback(http.expectedStatuses({ min: 200, max: 499 }));
+
 // ---------------------------------------------------------------------------
 // Phase 1 — Warm-up
 // ---------------------------------------------------------------------------
@@ -157,7 +172,7 @@ export function warmup() {
       "warmup: status 200": (r) => r.status === 200,
       "warmup: has current_stock": (r) => {
         try {
-          return r.json().current_stock !== undefined;
+          return r.json().stock !== undefined;
         } catch (_) {
           return false;
         }
@@ -196,6 +211,28 @@ export function flashSale() {
 
   if (res.status === 201) {
     ordersCreated.add(1);
+
+    // Verify the created order via GET /orders/{order_id}
+    try {
+      const orderId = res.json().id;
+      if (orderId) {
+        const getRes = http.get(`${BASE_URL}/orders/${orderId}`, {
+          tags: { endpoint: "get_order" },
+        });
+        check(getRes, {
+          "get_order: status 200 after creation": (r) => r.status === 200,
+          "get_order: correct order_id": (r) => {
+            try {
+              return r.json().id === orderId;
+            } catch (_) {
+              return false;
+            }
+          },
+        });
+      }
+    } catch (_) {
+      // Ignore JSON parse errors
+    }
   } else if (res.status === 409) {
     stockExhausted.add(1);
   }
@@ -241,7 +278,7 @@ export function idempotencyRetry() {
     vuState.quantity = quantity;
 
     if (res.status === 201) {
-      vuState.orderId = res.json().order_id;
+      vuState.orderId = res.json().id;
       vuState.originalCreated = true;
     } else {
       vuState.originalCreated = false;
@@ -273,9 +310,9 @@ export function idempotencyRetry() {
       // Original succeeded → replay must return 200 with same order_id
       const ok = check(res, {
         "idempotency: replay returns 200": (r) => r.status === 200,
-        "idempotency: same order_id on replay": (r) => {
+        "idempotency: same id on replay": (r) => {
           try {
-            return r.json().order_id === vuState.orderId;
+            return r.json().id === vuState.orderId;
           } catch (_) {
             return false;
           }
@@ -333,11 +370,10 @@ export function cancelWave() {
   // Pick a random confirmed order to cancel
   const target = confirmed[Math.floor(Math.random() * confirmed.length)];
 
-  const cancelPayload = JSON.stringify({ product_id: productId });
   const cancelRes = http.post(
     `${BASE_URL}/orders/${target.order_id}/cancel`,
-    cancelPayload,
-    Object.assign({ tags: { endpoint: "cancel_order" } }, JSON_HEADERS)
+    null,
+    { tags: { endpoint: "cancel_order" } }
   );
 
   check(cancelRes, {
@@ -351,6 +387,104 @@ export function cancelWave() {
   } else if (cancelRes.status === 409) {
     cancelAlreadyCancelled.add(1);
   }
+
+  sleep(Math.random() * 0.3);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3c — Get Order by ID
+// ---------------------------------------------------------------------------
+
+export function getOrder() {
+  const productId = Math.floor(Math.random() * 5) + 1;
+
+  // Discover orders via the list API
+  const listRes = http.get(`${BASE_URL}/orders?product_id=${productId}`, {
+    tags: { endpoint: "list_orders" },
+  });
+
+  if (listRes.status !== 200) {
+    sleep(0.5);
+    return;
+  }
+
+  let orders;
+  try {
+    const body = listRes.json();
+    orders = body.orders || [];
+  } catch (_) {
+    sleep(0.5);
+    return;
+  }
+
+  if (orders.length === 0) {
+    sleep(0.3);
+    return;
+  }
+
+  // Pick a random order and fetch it by ID
+  const target = orders[Math.floor(Math.random() * orders.length)];
+
+  const getRes = http.get(`${BASE_URL}/orders/${target.order_id}`, {
+    tags: { endpoint: "get_order" },
+  });
+
+  check(getRes, {
+    "get_order: status 200": (r) => r.status === 200,
+    "get_order: has required fields": (r) => {
+      try {
+        const body = r.json();
+        return (
+          body.id !== undefined &&
+          body.idempotency_key !== undefined &&
+          body.product_id !== undefined &&
+          body.customer_id !== undefined &&
+          body.quantity !== undefined &&
+          body.unit_price !== undefined &&
+          body.total_price !== undefined &&
+          body.status !== undefined &&
+          body.created_at !== undefined
+        );
+      } catch (_) {
+        return false;
+      }
+    },
+    "get_order: matches list data": (r) => {
+      try {
+        const body = r.json();
+        return (
+          body.id === target.order_id &&
+          body.status === target.status &&
+          body.quantity === target.quantity
+        );
+      } catch (_) {
+        return false;
+      }
+    },
+  });
+
+  if (getRes.status === 200) {
+    getOrderSuccess.add(1);
+  }
+
+  // Also test 404 for a non-existent order
+  const fakeRes = http.get(
+    `${BASE_URL}/orders/00000000-0000-4000-8000-000000000000`,
+    { tags: { endpoint: "get_order_404" } }
+  );
+
+  check(fakeRes, {
+    "get_order: 404 for non-existent order": (r) => r.status === 404,
+  });
+
+  // Test 422 for an invalid order_id format
+  const invalidRes = http.get(`${BASE_URL}/orders/not-a-valid-uuid`, {
+    tags: { endpoint: "get_order_422" },
+  });
+
+  check(invalidRes, {
+    "get_order: 422 for invalid order_id": (r) => r.status === 422,
+  });
 
   sleep(Math.random() * 0.3);
 }

@@ -58,6 +58,11 @@ function getOrders(productId) {
   }
 }
 
+function getOrderById(orderId) {
+  const res = http.get(`${BASE_URL}/orders/${orderId}`);
+  return res;
+}
+
 function log(msg) {
   console.log(`[validation] ${msg}`);
 }
@@ -68,6 +73,7 @@ function log(msg) {
 
 export default function () {
   const allOrderIds = [];
+  const allIdempotencyKeys = [];
   let allPassed = true;
 
   for (const product of PRODUCTS) {
@@ -84,14 +90,14 @@ export default function () {
     }
 
     log(
-      `  initial_stock=${product.initial_stock}  current_stock=${prod.current_stock}`
+      `  initial_stock=${product.initial_stock}  stock=${prod.stock}`
     );
 
     // -----------------------------------------------------------------
     // Rule 1: Stock must never be negative
     // -----------------------------------------------------------------
     check(prod, {
-      [`product ${product.id}: stock >= 0`]: (p) => p.current_stock >= 0,
+      [`product ${product.id}: stock >= 0`]: (p) => p.stock >= 0,
     });
 
     // Fetch orders
@@ -116,7 +122,7 @@ export default function () {
 
     // -----------------------------------------------------------------
     // Rule 1 (cont): Stock integrity equation
-    // current_stock = initial_stock - confirmed_qty + cancelled_qty
+    // stock = initial_stock - confirmed_qty + cancelled_qty
     // Only verifiable if we can see ALL orders (endpoint returns max 50)
     // -----------------------------------------------------------------
     const expectedStock =
@@ -125,8 +131,8 @@ export default function () {
     if (orders.length < 50) {
       // We have all orders — full equation check
       check(null, {
-        [`product ${product.id}: stock integrity (expected=${expectedStock}, actual=${prod.current_stock})`]:
-          () => prod.current_stock === expectedStock,
+        [`product ${product.id}: stock integrity (expected=${expectedStock}, actual=${prod.stock})`]:
+          () => prod.stock === expectedStock,
       });
     } else {
       // Partial view — can only verify stock is non-negative
@@ -153,10 +159,63 @@ export default function () {
     }
 
     // -----------------------------------------------------------------
+    // Rule 3: No duplicate idempotency_keys — fetch all orders individually
+    // Each idempotency_key must map to at most one order.
+    // -----------------------------------------------------------------
+    const idempotencyKeys = [];
+
+    for (const order of orders) {
+      const res = getOrderById(order.order_id);
+
+      if (res.status === 200) {
+        try {
+          const detail = res.json();
+
+          // Validate required fields
+          check(detail, {
+            [`product ${product.id}: order ${order.order_id} has all required fields`]:
+              (d) =>
+                d.id !== undefined &&
+                d.idempotency_key !== undefined &&
+                d.product_id !== undefined &&
+                d.customer_id !== undefined &&
+                d.quantity !== undefined &&
+                d.unit_price !== undefined &&
+                d.total_price !== undefined &&
+                d.status !== undefined &&
+                d.created_at !== undefined,
+            [`product ${product.id}: order ${order.order_id} status matches list`]:
+              (d) => d.status === order.status,
+            [`product ${product.id}: order ${order.order_id} quantity matches list`]:
+              (d) => d.quantity === order.quantity,
+            [`product ${product.id}: order ${order.order_id} product_id is correct`]:
+              (d) => d.product_id === product.id,
+          });
+
+          if (detail.idempotency_key) {
+            idempotencyKeys.push(detail.idempotency_key);
+            allIdempotencyKeys.push({
+              key: detail.idempotency_key,
+              productId: product.id,
+            });
+          }
+        } catch (_) {
+          // JSON parse error
+        }
+      }
+    }
+
+    const uniqueKeys = new Set(idempotencyKeys);
+    check(null, {
+      [`product ${product.id}: no duplicate idempotency_keys (${idempotencyKeys.length} keys, ${uniqueKeys.size} unique)`]:
+        () => idempotencyKeys.length === uniqueKeys.size,
+    });
+
+    // -----------------------------------------------------------------
     // Rule 4: Order consistency — stock delta matches order impact
     // -----------------------------------------------------------------
     if (orders.length < 50) {
-      const stockDelta = product.initial_stock - prod.current_stock;
+      const stockDelta = product.initial_stock - prod.stock;
       const orderImpact = confirmedQty - cancelledQty;
 
       check(null, {
@@ -176,14 +235,13 @@ export default function () {
         // Get stock before re-cancel
         const before = getProduct(product.id);
         if (!before) continue;
-        const stockBefore = before.current_stock;
+        const stockBefore = before.stock;
 
         // Attempt to cancel again
-        const cancelPayload = JSON.stringify({ product_id: product.id });
         const res = http.post(
           `${BASE_URL}/orders/${order.order_id}/cancel`,
-          cancelPayload,
-          { headers: { "Content-Type": "application/json" } }
+          null,
+          {}
         );
 
         check(res, {
@@ -196,11 +254,25 @@ export default function () {
         if (!after) continue;
 
         check(null, {
-          [`product ${product.id}: stock unchanged after re-cancel (before=${stockBefore}, after=${after.current_stock})`]:
-            () => stockBefore === after.current_stock,
+          [`product ${product.id}: stock unchanged after re-cancel (before=${stockBefore}, after=${after.stock})`]:
+            () => stockBefore === after.stock,
         });
       }
     }
+
+    // Test 404 for a non-existent order
+    const notFoundRes = getOrderById("00000000-0000-4000-8000-000000000000");
+    check(notFoundRes, {
+      [`product ${product.id}: GET non-existent order returns 404`]: (r) =>
+        r.status === 404,
+    });
+
+    // Test 422 for an invalid order_id format
+    const invalidRes = getOrderById("not-a-valid-uuid");
+    check(invalidRes, {
+      [`product ${product.id}: GET invalid order_id returns 422`]: (r) =>
+        r.status === 422,
+    });
 
     log(`  Product ${product.id} checks complete.`);
   }
@@ -230,7 +302,35 @@ export default function () {
   });
 
   log(
-    `Total orders checked: ${allOrderIds.length}, cross-product duplicates: ${crossDuplicates}`
+    `Total orders checked: ${allOrderIds.length}, cross-product order_id duplicates: ${crossDuplicates}`
+  );
+
+  // -------------------------------------------------------------------
+  // Rule 3 (cont): No idempotency_key appears across multiple products
+  // -------------------------------------------------------------------
+  log(`--- Cross-product idempotency_key duplicate check ---`);
+
+  const seenKeysMap = {};
+  let keyDuplicates = 0;
+
+  for (const entry of allIdempotencyKeys) {
+    if (seenKeysMap[entry.key] !== undefined) {
+      log(
+        `  DUPLICATE KEY: idempotency_key ${entry.key} in product ${seenKeysMap[entry.key]} and ${entry.productId}`
+      );
+      keyDuplicates++;
+    } else {
+      seenKeysMap[entry.key] = entry.productId;
+    }
+  }
+
+  check(null, {
+    [`no cross-product duplicate idempotency_keys (found ${keyDuplicates} duplicates)`]:
+      () => keyDuplicates === 0,
+  });
+
+  log(
+    `Total idempotency_keys checked: ${allIdempotencyKeys.length}, cross-product duplicates: ${keyDuplicates}`
   );
   log(`=== Validation complete ===`);
 }
