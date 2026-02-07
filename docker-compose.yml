@@ -1,3 +1,9 @@
+version: "3.5"
+
+networks:
+  flashsale:
+    name: flashsale
+
 services:
   api01: &api
     build: .
@@ -5,6 +11,8 @@ services:
     env_file: .env
     depends_on:
       - db
+    networks:
+      - flashsale
     deploy:
       resources:
         limits:
@@ -24,6 +32,8 @@ services:
       - api02
     ports:
       - "9999:9999"
+    networks:
+      - flashsale
     deploy:
       resources:
         limits:
@@ -41,7 +51,15 @@ services:
       - "5432:5432"
     volumes:
       - ./.config/init.sql:/docker-entrypoint-initdb.d/init.sql
-    command: postgres -c checkpoint_timeout=600 -c max_wal_size=4096
+    command: >-
+      postgres
+      -c checkpoint_timeout=600
+      -c max_wal_size=4096
+      -c shared_buffers=128MB
+      -c synchronous_commit=off
+      -c max_connections=150
+    networks:
+      - flashsale
     deploy:
       resources:
         limits:

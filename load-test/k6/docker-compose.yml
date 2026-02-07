@@ -1,0 +1,17 @@
+networks:
+  flashsale:
+    external: true
+    name: flashsale
+
+services:
+  k6-stress:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - BASE_URL=${BASE_URL:-http://nginx:9999}
+    networks:
+      - flashsale
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65535"
+      net.ipv4.tcp_tw_reuse: 1
