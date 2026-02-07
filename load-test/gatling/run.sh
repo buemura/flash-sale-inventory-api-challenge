@@ -2,13 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_URL="${BASE_URL:-http://host.docker.internal:9999}"
+BASE_URL="${BASE_URL:-http://nginx:9999}"
 
 # URL for pre-flight checks (runs on host, not inside Docker)
-HOST_URL="${BASE_URL//host.docker.internal/localhost}"
+HOST_URL="http://localhost:9999"
 
 echo "============================================"
-echo "  Ultra API — Stress Test"
+echo "  Ultra API — Stress Test (Gatling)"
 echo "============================================"
 echo "Target (inside Docker): ${BASE_URL}"
 echo "Target (host):          ${HOST_URL}"
@@ -35,33 +35,24 @@ done
 echo ""
 
 # -------------------------------------------------------------------
-# Phase 1-3: Stress test
+# Clean previous results
 # -------------------------------------------------------------------
-echo "[phase 1-3] Running stress test (warmup → flash sale → cancellations)..."
+rm -rf "${SCRIPT_DIR}/results"
+mkdir -p "${SCRIPT_DIR}/results"
+
+# -------------------------------------------------------------------
+# Run Gatling stress test + validation (all phases in one simulation)
+# -------------------------------------------------------------------
+echo "[phases 1-4] Running Gatling simulation (warmup → flash sale → cancellations → validation)..."
 echo "--------------------------------------------"
 
-STRESS_EXIT=0
+GATLING_EXIT=0
 docker compose -f "${SCRIPT_DIR}/docker-compose.yml" run --rm \
   -e BASE_URL="${BASE_URL}" \
-  k6-stress || STRESS_EXIT=$?
+  gatling-stress || GATLING_EXIT=$?
 
 echo "--------------------------------------------"
-echo "[phase 1-3] Exit code: ${STRESS_EXIT}"
-echo ""
-
-# -------------------------------------------------------------------
-# Phase 4: Validation
-# -------------------------------------------------------------------
-echo "[phase 4] Running post-test validation..."
-echo "--------------------------------------------"
-
-VALIDATION_EXIT=0
-docker compose -f "${SCRIPT_DIR}/docker-compose.yml" run --rm \
-  -e BASE_URL="${BASE_URL}" \
-  k6-validation || VALIDATION_EXIT=$?
-
-echo "--------------------------------------------"
-echo "[phase 4] Exit code: ${VALIDATION_EXIT}"
+echo "[phases 1-4] Exit code: ${GATLING_EXIT}"
 echo ""
 
 # -------------------------------------------------------------------
@@ -71,15 +62,21 @@ echo "============================================"
 echo "  Results"
 echo "============================================"
 
-if [ "${STRESS_EXIT}" -eq 0 ] && [ "${VALIDATION_EXIT}" -eq 0 ]; then
+# Find the HTML report
+REPORT_DIR=$(find "${SCRIPT_DIR}/results" -name "index.html" -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+
+if [ -n "${REPORT_DIR}" ]; then
   echo ""
+  echo "  HTML Report: ${REPORT_DIR}/index.html"
+  echo ""
+fi
+
+if [ "${GATLING_EXIT}" -eq 0 ]; then
   echo "  PASS — All tests passed!"
   echo ""
   exit 0
 else
-  echo ""
-  [ "${STRESS_EXIT}" -ne 0 ] && echo "  FAIL — Stress test thresholds not met (exit ${STRESS_EXIT})"
-  [ "${VALIDATION_EXIT}" -ne 0 ] && echo "  FAIL — Validation checks failed (exit ${VALIDATION_EXIT})"
+  echo "  FAIL — Stress test or validation failed (exit ${GATLING_EXIT})"
   echo ""
   exit 1
 fi

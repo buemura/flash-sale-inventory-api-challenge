@@ -1,0 +1,19 @@
+networks:
+  flashsale:
+    external: true
+    name: flashsale
+
+services:
+  gatling-stress:
+    build:
+      context: ./gatling
+      dockerfile: Dockerfile
+    environment:
+      - BASE_URL=${BASE_URL:-http://nginx:9999}
+    volumes:
+      - ./results:/opt/gatling/results
+    networks:
+      - flashsale
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65535"
+      net.ipv4.tcp_tw_reuse: 1
